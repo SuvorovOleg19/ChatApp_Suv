@@ -2,6 +2,7 @@ import socket
 import threading
 import logging
 from datetime import datetime
+from cryptography.fernet import Fernet
 from config import load_config
 
 # Настройка логирования
@@ -11,16 +12,22 @@ logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(message)s",
 )
 
-
-# Хранение подключений: {имя_пользователя: сокет}
+# Глобальные переменные
 clients = {}
 lock = threading.Lock()
+encryption_key = Fernet.generate_key()
+cipher = Fernet(encryption_key)
 
 
 def send_message(sender, message, recipient=None):
-    """Отправка сообщения конкретному клиенту или всем"""
+    """Отправка сообщения определенному клиенту или всем"""
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     full_message = f"[{timestamp}] {sender}: {message}"
+
+    # Логирование в зашифрованном виде
+    encrypted_message = cipher.encrypt(full_message.encode())
+    with open("chat.log", "ab") as log_file:
+        log_file.write(encrypted_message + b"\n")
 
     with lock:
         if recipient:
@@ -33,7 +40,13 @@ def send_message(sender, message, recipient=None):
                 if client != sender:
                     conn.send(full_message.encode())
 
-def handle_client(conn, addr):
+
+def broadcast_udp(message, udp_socket, udp_port):
+    """Широковещательная отправка по UDP"""
+    udp_socket.sendto(message.encode(), ("<broadcast>", udp_port))
+
+
+def handle_client(conn, addr, udp_socket, udp_port):
     """Обработка клиента"""
     conn.send("Введите ваше имя: ".encode())
     name = conn.recv(1024).decode().strip()
@@ -42,16 +55,22 @@ def handle_client(conn, addr):
         clients[name] = conn
 
     print(f"{name} подключился с {addr}.")
+    conn.send(f"Добро пожаловать, {name}! Введите /users для списка пользователей.".encode())
 
     try:
         while True:
             message = conn.recv(1024).decode()
             if message == "/exit":
                 break
-
-            if message.startswith("@"):
+            elif message == "/users":
+                user_list = ", ".join(clients.keys())
+                conn.send(f"Подключенные пользователи: {user_list}".encode())
+            elif message.startswith("@"):
                 recipient, msg = message[1:].split(" ", 1)
                 send_message(name, msg, recipient)
+            elif message.startswith("!broadcast "):
+                msg = message[len("!broadcast "):]
+                broadcast_udp(f"{name}: {msg}", udp_socket, udp_port)
             else:
                 send_message(name, message)
     except Exception as e:
@@ -62,41 +81,40 @@ def handle_client(conn, addr):
         conn.close()
         print(f"{name} отключился.")
 
-def start_tcp_server(host, port):
+
+def start_tcp_server(host, tcp_port, udp_socket, udp_port):
     """Запуск TCP сервера"""
     server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    server_socket.bind((host, port))
+    server_socket.bind((host, tcp_port))
     server_socket.listen(5)
-    print(f"TCP сервер запущен на {host}:{port}")
+    print(f"TCP сервер запущен на {host}:{tcp_port}")
 
     while True:
         conn, addr = server_socket.accept()
-        threading.Thread(target=handle_client, args=(conn, addr), daemon=True).start()
+        threading.Thread(
+            target=handle_client, args=(conn, addr, udp_socket, udp_port), daemon=True
+        ).start()
 
 
-def start_udp_server(host, port):
+def start_udp_server(host, udp_port):
     """Запуск UDP сервера"""
     server_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    server_socket.bind((host, port))
-    print(f"UDP сервер запущен на {host}:{port}")
+    server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+    server_socket.bind((host, udp_port))
+    print(f"UDP сервер запущен на {host}:{udp_port}")
+    return server_socket
 
-    while True:
-        try:
-            message, client_address = server_socket.recvfrom(1024)
-            message = message.decode()
-            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            print(f"[UDP] {timestamp} от {client_address}: {message}")
-        except Exception as e:
-            logging.error(f"Ошибка UDP: {e}")
 
 def main():
     config = load_config()
-    host = config["host"]
+    host = config.get("host", socket.gethostbyname(socket.gethostname()))
     tcp_port = config["tcp_port"]
     udp_port = config["udp_port"]
 
-    threading.Thread(target=start_tcp_server, args=(host, tcp_port), daemon=True).start()
-    threading.Thread(target=start_udp_server, args=(host, udp_port), daemon=True).start()
+    udp_socket = start_udp_server(host, udp_port)
+    threading.Thread(
+        target=start_tcp_server, args=(host, tcp_port, udp_socket, udp_port), daemon=True
+    ).start()
 
     print("Сервер работает. Нажмите Ctrl+C для завершения.")
     try:
@@ -104,6 +122,8 @@ def main():
             pass
     except KeyboardInterrupt:
         print("Завершение работы сервера.")
+        udp_socket.close()
+
 
 if __name__ == "__main__":
     main()
