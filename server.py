@@ -11,7 +11,7 @@ def broadcast(sender_name, receiver_name, message):
     """Отправляет сообщение указанному получателю"""
     if receiver_name in clients:
         try:
-            full_message = f"[{sender_name} -> {receiver_name}]: {message}"
+            full_message = f"[{sender_name}]: {message}"
             clients[receiver_name].sendall(full_message.encode())
         except Exception as e:
             logging.error(f"Ошибка отправки сообщения: {e}")
