@@ -1,80 +1,109 @@
 import socket
 import threading
 import logging
+from datetime import datetime
+from config import load_config
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+# Настройка логирования
+logging.basicConfig(
+    filename="server.log",
+    level=logging.ERROR,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+)
+
 
 # Хранение подключений: {имя_пользователя: сокет}
 clients = {}
+lock = threading.Lock()
 
-def broadcast(sender_name, receiver_name, message):
-    """Отправляет сообщение указанному получателю"""
-    if receiver_name in clients:
-        try:
-            full_message = f"[{sender_name}]: {message}"
-            clients[receiver_name].sendall(full_message.encode())
-        except Exception as e:
-            logging.error(f"Ошибка отправки сообщения: {e}")
-    else:
-        logging.warning(f"Получатель '{receiver_name}' не найден.")
 
-def handle_client(client_socket):
-    """Обрабатывает подключение клиента"""
+def send_message(sender, message, recipient=None):
+    """Отправка сообщения конкретному клиенту или всем"""
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    full_message = f"[{timestamp}] {sender}: {message}"
+
+    with lock:
+        if recipient:
+            if recipient in clients:
+                clients[recipient].send(full_message.encode())
+            else:
+                clients[sender].send(f"Пользователь {recipient} не найден.".encode())
+        else:
+            for client, conn in clients.items():
+                if client != sender:
+                    conn.send(full_message.encode())
+
+def handle_client(conn, addr):
+    """Обработка клиента"""
+    conn.send("Введите ваше имя: ".encode())
+    name = conn.recv(1024).decode().strip()
+
+    with lock:
+        clients[name] = conn
+
+    print(f"{name} подключился с {addr}.")
+
     try:
-        # Получаем имя пользователя
-        client_socket.sendall("Введите свое имя: ".encode())
-        user_name = client_socket.recv(1024).decode().strip()
-        if user_name in clients:
-            client_socket.sendall("Имя занято. Подключитесь снова.".encode())
-            client_socket.close()
-            return
-
-        clients[user_name] = client_socket
-        logging.info(f"Подключен пользователь: {user_name}")
-        client_socket.sendall("Вы подключены. Можете отправлять сообщения.".encode())
-
         while True:
-            # Ожидаем сообщение в формате "получатель: сообщение"
-            data = client_socket.recv(1024).decode().strip()
-            if not data:
+            message = conn.recv(1024).decode()
+            if message == "/exit":
                 break
 
-            if ":" not in data:
-                client_socket.sendall("Неверный формат сообщения. Используйте 'получатель: сообщение'.".encode())
-                continue
-
-            receiver_name, message = data.split(":", 1)
-            receiver_name = receiver_name.strip()
-            message = message.strip()
-
-            if receiver_name == "":  # Если поле пустое
-                client_socket.sendall("Укажите получателя.".encode())
+            if message.startswith("@"):
+                recipient, msg = message[1:].split(" ", 1)
+                send_message(name, msg, recipient)
             else:
-                broadcast(user_name, receiver_name, message)
-
+                send_message(name, message)
     except Exception as e:
-        logging.error(f"Ошибка в обработке клиента: {e}")
+        logging.error(f"Ошибка у клиента {name}: {e}")
     finally:
-        logging.info(f"Отключен пользователь: {user_name}")
-        if user_name in clients:
-            del clients[user_name]
-        client_socket.close()
+        with lock:
+            del clients[name]
+        conn.close()
+        print(f"{name} отключился.")
 
-def start_server(host="127.0.0.1", port=12345):
-    """Запускает сервер"""
+def start_tcp_server(host, port):
+    """Запуск TCP сервера"""
     server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server_socket.bind((host, port))
     server_socket.listen(5)
-    logging.info(f"Сервер запущен на {host}:{port}")
+    print(f"TCP сервер запущен на {host}:{port}")
 
+    while True:
+        conn, addr = server_socket.accept()
+        threading.Thread(target=handle_client, args=(conn, addr), daemon=True).start()
+
+
+def start_udp_server(host, port):
+    """Запуск UDP сервера"""
+    server_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    server_socket.bind((host, port))
+    print(f"UDP сервер запущен на {host}:{port}")
+
+    while True:
+        try:
+            message, client_address = server_socket.recvfrom(1024)
+            message = message.decode()
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            print(f"[UDP] {timestamp} от {client_address}: {message}")
+        except Exception as e:
+            logging.error(f"Ошибка UDP: {e}")
+
+def main():
+    config = load_config()
+    host = config["host"]
+    tcp_port = config["tcp_port"]
+    udp_port = config["udp_port"]
+
+    threading.Thread(target=start_tcp_server, args=(host, tcp_port), daemon=True).start()
+    threading.Thread(target=start_udp_server, args=(host, udp_port), daemon=True).start()
+
+    print("Сервер работает. Нажмите Ctrl+C для завершения.")
     try:
         while True:
-            client_socket, _ = server_socket.accept()
-            threading.Thread(target=handle_client, args=(client_socket,), daemon=True).start()
+            pass
     except KeyboardInterrupt:
-        logging.info("Сервер остановлен вручную")
-    finally:
-        server_socket.close()
+        print("Завершение работы сервера.")
 
 if __name__ == "__main__":
-    start_server()
+    main()
