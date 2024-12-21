@@ -43,7 +43,12 @@ def send_message(sender, message, recipient=None):
 
 def broadcast_udp(message, udp_socket, udp_port):
     """Широковещательная отправка по UDP"""
-    udp_socket.sendto(message.encode(), ("<broadcast>", udp_port))
+    broadcast_address = "255.255.255.255"  # Используйте широковещательный адрес
+    try:
+        udp_socket.sendto(message.encode(), (broadcast_address, udp_port))
+    except Exception as e:
+        logging.error(f"Ошибка при отправке UDP сообщения: {e}")
+
 
 
 def handle_client(conn, addr, udp_socket, udp_port):
